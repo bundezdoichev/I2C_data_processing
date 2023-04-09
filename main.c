@@ -48,13 +48,15 @@
 #include "cybsp.h"
 #include "cy_retarget_io.h"
 #include "bme280_defs.h"
+#include "stdio.h"
+#include "cy_scb_common.h"
 
 
 /*******************************************************************************
 * Macros
 *******************************************************************************/
 /* Delay of 1000ms between commands */
-#define CMD_TO_CMD_DELAY        (1000UL)
+#define CMD_TO_CMD_DELAY        (3000UL)
 
 /* I2C bus frequency */
 #define I2C_FREQ                (400000UL)
@@ -63,6 +65,14 @@
 #define CYBSP_I2C_SCL P8_0
 #define CYBSP_I2C_SDA P8_1
 
+#define DATA_BITS_8     8
+#define STOP_BITS_1     1
+#define BAUD_RATE       115200
+#define UART_DELAY      10u
+#define TX_BUF_SIZE     18
+
+#define CYBSP_DEBUG_UART_TX P5_1
+#define CYBSP_DEBUG_UART_RX P5_0
 
 /*******************************************************************************
 * Global Variables
@@ -76,6 +86,7 @@ static cyhal_i2c_t mI2C;
 * Function Prototypes
 *******************************************************************************/
 void bme280_intefrace_select(struct bme280_dev *, int8_t);
+void print_buffer(const char * buff_name, void *buffer, size_t len);
 
 
 /*******************************************************************************
@@ -129,27 +140,12 @@ int main(void)
     /* Board init failed. Stop program execution */
     handle_error(result);
 
-    /* Initialize the retarget-io */
-    result = cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX,
-                                  CY_RETARGET_IO_BAUDRATE);
-    /* Retarget-io init failed. Stop program execution */
-    handle_error(result);
-
     /* Free needed GPIO pins */
-    result = cyhal_gpio_init(P8_1, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_OPENDRAINDRIVESHIGH, 1); // 8_1 already init
-    cyhal_gpio_free(P8_1);
-    result = cyhal_gpio_init(P5_0, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_OPENDRAINDRIVESHIGH, 1); // 8_1 already init
-    cyhal_gpio_free(P8_0);
+    /* result = cyhal_gpio_init(P8_1, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_OPENDRAINDRIVESHIGH, 1); // 8_1 already init */
+    /* cyhal_gpio_free(P8_1); */
+    /* result = cyhal_gpio_init(P8_0, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_OPENDRAINDRIVESHIGH, 1); // 8_1 already init */
+    /* cyhal_gpio_free(P8_0); */
 
-    /* \x1b[2J\x1b[;H - ANSI ESC sequence for clear screen */
-    printf("\x1b[2J\x1b[;H");
-
-    printf("****************** "
-           "HAL: I2C Master "
-           "****************** \r\n\n");
-
-    /* I2C Master configuration settings */
-    printf(">> Configuring I2C Master..... ");
     mI2C_cfg.is_slave = false;
     mI2C_cfg.address = 0;
     mI2C_cfg.frequencyhal_hz = I2C_FREQ;
@@ -164,8 +160,6 @@ int main(void)
     /* I2C master configuration failed. Stop program execution */
     handle_error(result);
 
-    printf("Done\r\n\n");
-
     /* Enable interrupts */
     __enable_irq();
 
@@ -177,19 +171,67 @@ int main(void)
     int8_t rslt;
     rslt = bme280_init(&dev);
     if (rslt != BME280_OK) {
-        printf("Device init failed.\r\n");
+    }
+    cy_rslt_t uart_read_rslt;
+
+    /* Variable Declarations for UART */
+    cyhal_uart_t uart_obj;
+    uint32_t actualbaud;
+
+    char_t tx_buf[TX_BUF_SIZE];
+    size_t tx_length = TX_BUF_SIZE;
+    memset(tx_buf, ' ', tx_length);
+
+    /* Initialize the UART configuration structure */
+    const cyhal_uart_cfg_t uart_config =
+    {
+        .data_bits = DATA_BITS_8,
+        .stop_bits = STOP_BITS_1,
+        .parity = CYHAL_UART_PARITY_NONE,
+        .rx_buffer = NULL,
+        .rx_buffer_size = 0
+    };
+    /* Initialize the UART Block */
+    uart_read_rslt = cyhal_uart_init(&uart_obj, CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, NC, NC, NULL, &uart_config);
+    if (uart_read_rslt != 0) {
     }
 
+    /* Set the baud rate */
+    uart_read_rslt = cyhal_uart_set_baud(&uart_obj, BAUD_RATE, &actualbaud);
+
+    uint8_t is_ready_to_read = 1;
+    uint32_t delay_ms = CMD_TO_CMD_DELAY;
+    char input;
     for (;;)
     {
-        rslt = bme280_get_sensor_data(BME280_ALL, &comp_data, &dev);
-        if (rslt != BME280_OK) {
-            printf("Failed to get sensor data.\r\n");
+        if (cyhal_uart_readable(&uart_obj)) {
+            uart_read_rslt = cyhal_uart_getc(&uart_obj, &input, 1);
+            if (uart_read_rslt == CY_SCB_UART_SUCCESS) {
+                if (input == '1') {
+                    is_ready_to_read = is_ready_to_read ? 0 : 1;
+                } else if (input == '2') {
+                    uart_read_rslt = cyhal_uart_getc(&uart_obj, &input, 10*1000);
+                    if (uart_read_rslt == CY_SCB_UART_SUCCESS) {
+                        delay_ms = ((int)input - 48) * 1000; // * 1000
+                    }
+                }
+            }
         }
-        print_sensor_data(&comp_data);
-        /* /1* Give delay between commands *1/ */
-        cyhal_system_delay_ms(CMD_TO_CMD_DELAY);
 
+        if (is_ready_to_read) {
+            rslt = bme280_get_sensor_data(BME280_ALL, &comp_data, &dev);
+
+            if (rslt != BME280_OK) {
+                comp_data.humidity = 0.0;
+                comp_data.pressure = 0.0;
+                comp_data.temperature = 0.0;
+            }
+
+            print_sensor_data(&uart_obj, &comp_data, tx_buf, &tx_length);
+
+            /* Give delay between commands */
+            cyhal_system_delay_ms(delay_ms);
+        }
     }
 }
 
@@ -224,10 +266,14 @@ void bme280_intefrace_select(struct bme280_dev *dev, int8_t intf) {
         dev->write = device_mem_write;
         dev->delay_us = device_delay_us;
     } else {
-        printf("Not I2C interface is chosen!\nAbort further execution.\r\n");
+        /* printf("Not I2C interface is chosen!\nAbort further execution.\r\n"); */
     }
 }
 
-void print_sensor_data(struct bme280_data *data) {
-    printf("Temp: %f - Pressure: %f - Humidity: %f\r\n", data->humidity, data->pressure, data->temperature);
+void print_sensor_data(cyhal_uart_t *uart_obj, struct bme280_data *data, uint8_t *tx_buf, size_t *tx_length) {
+
+    sprintf(tx_buf, ":%.1f,%.1f,%.1f\n", data->humidity, data->pressure, data->temperature);
+    cyhal_uart_write(uart_obj, tx_buf, tx_length);
 }
+
+
